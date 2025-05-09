@@ -8,12 +8,46 @@ from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 import logging
 from tqdm import tqdm
-from synthetic_gen import get_dataloader
+from synthetic_signal_dataset import get_dataloader
 from torch.distributions import StudentT, MixtureSameFamily, Independent, Normal
 from torch.cuda.amp import autocast, GradScaler
 
 class VAE(nn.Module):
+    """
+    Variational Autoencoder with a mixture of Student's t distributions 
+    as the decoder output, used for modeling complex time-series signals.
+
+    Args:
+        latent_dim (int): Dimension of the latent space.
+        input_channels (int): Number of input channels (e.g., number of image channels).
+        image_size (int): Height and width of the square input images.
+        signal_length (int): Length of the output time-series signal.
+        n_components (int): Number of mixture components for the decoder distribution.
+
+    Methods:
+        - encode(x): Encodes input into latent mean and log-variance.
+        - reparameterize(mu, log_var): Applies reparameterization trick.
+        - decode(z): Decodes latent vector into mixture parameters.
+        - forward(x): Forward pass returning both latent and decoded outputs.
+        - create_mixture_distribution(...): Builds a Student's t mixture distribution.
+        - sample_from_mixture(...): Draws samples from the mixture.
+        - loss_function(...): Computes reconstruction + KL loss.
+        - predict_signals(...): Reconstructs or samples signals given a batch.
+        - generate(...): Generates new synthetic signals.
+        - load_from_checkpoint(...): Loads a model and optionally an optimizer from a checkpoint.
+    """
     def __init__(self, latent_dim=128, input_channels=4, image_size=64, signal_length=600, n_components=3):
+        """
+        Initialize the Variational Autoencoder (VAE) model with a mixture of Student's t distributions 
+        as output. This model is designed for learning probabilistic representations of image-to-signal mappings.
+
+        Args:
+            latent_dim (int): Dimensionality of the latent space.
+            input_channels (int): Number of channels in the input image (e.g., 1 for grayscale, 3 for RGB, 4 for multi-modal).
+            image_size (int): Height/width of the square input image.
+            signal_length (int): Length of the time-series signal to be generated as output.
+            n_components (int): Number of components in the Student's t mixture model decoder.
+        """
         super(VAE, self).__init__()
         
         self.image_size = image_size
@@ -67,17 +101,51 @@ class VAE(nn.Module):
         self.dofs = nn.Linear(2048, n_components)
         
     def encode(self, x):
+        """
+        Encode input images into latent space parameters (mean and log variance).
+
+        Args:
+            x (torch.Tensor): Input image tensor of shape [batch_size, channels, H, W].
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: 
+                - mu: Mean of the latent distribution [batch_size, latent_dim]
+                - log_var: Log variance of the latent distribution [batch_size, latent_dim]
+        """
         x = self.encoder(x)
         mu = self.fc_mu(x)
         log_var = self.fc_var(x)
         return mu, log_var
     
     def reparameterize(self, mu, log_var):
+        """
+        Sample from a Gaussian using the reparameterization trick.
+
+        Args:
+            mu (torch.Tensor): Mean of the latent distribution [batch_size, latent_dim]
+            log_var (torch.Tensor): Log variance [batch_size, latent_dim]
+
+        Returns:
+            torch.Tensor: Sampled latent vector z [batch_size, latent_dim]
+        """
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
     
     def decode(self, z):
+        """
+        Decode latent vector into the parameters of a Student's t mixture model.
+
+        Args:
+            z (torch.Tensor): Latent vector of shape [batch_size, latent_dim]
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                - mixture_weights: [batch_size, n_components]
+                - locations: [batch_size, n_components, signal_length]
+                - scales: [batch_size, n_components, signal_length]
+                - dofs: [batch_size, n_components]
+        """
         # Get base features
         x = self.decoder(z)
         
@@ -98,6 +166,17 @@ class VAE(nn.Module):
         return mixture_weights, locations, scales, dofs
     
     def forward(self, x):
+        """
+        Complete forward pass: encodes input, samples latent vector, decodes mixture parameters.
+
+        Args:
+            x (torch.Tensor): Input image tensor of shape [batch_size, channels, H, W]
+
+        Returns:
+            Tuple:
+                - mixture_weights, locations, scales, dofs: Parameters of the Student's t mixture
+                - mu, log_var, z: Latent space mean, variance, and sampled vector
+        """
         mu, log_var = self.encode(x)
         z = self.reparameterize(mu, log_var)
         mixture_weights, locations, scales, dofs = self.decode(z)
@@ -281,7 +360,25 @@ class VAE(nn.Module):
         return model, optimizer
 
 class VAE1D(nn.Module):
+    """
+    Variational Autoencoder (VAE) for 1D time-series signals using a mixture of Student's t-distributions 
+    as the decoder output. It maps input signals into a latent space and learns to reconstruct them 
+    through probabilistic modeling.
+
+    Args:
+        latent_dim (int): Dimensionality of the latent space.
+        signal_length (int): Length of the time-series signal.
+        n_components (int): Number of mixture components in the decoder.
+    """
     def __init__(self, latent_dim=128, signal_length=600, n_components=3):
+        """
+        Initialize the 1D VAE model architecture.
+
+        Args:
+            latent_dim (int): Dimension of the latent space.
+            signal_length (int): Length of the time-series signal.
+            n_components (int): Number of components in the Student's t mixture model.
+        """
         super(VAE1D, self).__init__()
         
         self.signal_length = signal_length
@@ -337,6 +434,17 @@ class VAE1D(nn.Module):
         self.dofs = nn.Linear(2048, n_components)
         
     def encode(self, x):
+        """
+        Encode input signals into latent space parameters (mean and log variance).
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, signal_length]
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: 
+                - mu: Mean of the latent distribution [batch_size, latent_dim]
+                - log_var: Log variance of the latent distribution [batch_size, latent_dim]
+        """
         # Reshape input to [batch_size, channels=1, signal_length]
         x = x.unsqueeze(1)  # Add channel dimension
         x = self.encoder(x)
@@ -345,11 +453,34 @@ class VAE1D(nn.Module):
         return mu, log_var
     
     def reparameterize(self, mu, log_var):
+        """
+        Sample from a Gaussian distribution using the reparameterization trick.
+
+        Args:
+            mu (torch.Tensor): Mean of the latent distribution [batch_size, latent_dim]
+            log_var (torch.Tensor): Log variance of the latent distribution [batch_size, latent_dim]
+
+        Returns:
+            torch.Tensor: Sampled latent vector z [batch_size, latent_dim]
+        """
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
     
     def decode(self, z):
+        """
+        Decode latent vector into the parameters of a Student's t mixture model.
+
+        Args:
+            z (torch.Tensor): Latent vector [batch_size, latent_dim]
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                - mixture_weights: [batch_size, n_components]
+                - locations: [batch_size, n_components, signal_length]
+                - scales: [batch_size, n_components, signal_length]
+                - dofs: [batch_size, n_components]
+        """
         # Same as original VAE
         x = self.decoder(z)
         
@@ -364,6 +495,15 @@ class VAE1D(nn.Module):
         return mixture_weights, locations, scales, dofs
     
     def forward(self, x):
+        """
+        Complete forward pass: encode, sample latent, decode mixture parameters.
+
+        Args:
+            x (torch.Tensor): Input signal tensor [batch_size, signal_length]
+
+        Returns:
+            Tuple: mixture parameters (weights, locations, scales, dofs), and latent variables (mu, log_var, z)
+        """
         mu, log_var = self.encode(x)
         z = self.reparameterize(mu, log_var)
         mixture_weights, locations, scales, dofs = self.decode(z)
@@ -623,7 +763,7 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
         }, os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth'))
         logging.info(f'Saved checkpoint for epoch {epoch+1}')
 
-        return model
+    return model
 
 
 def main():

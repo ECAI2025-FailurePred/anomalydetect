@@ -654,7 +654,7 @@ def array_to_loader(X, y, dim=61):
     loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True)
     return loader
 
-def investigate(vae, loader):
+def investigate(vae, loader, Signal_dim):
     """
     Investigates the embeddings and reconstructions produced by a VAE model.
 

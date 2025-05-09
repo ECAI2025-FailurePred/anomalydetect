@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-# from scipy.signal import cwt as cwt_func
+
 from scipy import signal as scipy_signal 
 from pyts.image import MarkovTransitionField
 from pyts.image import GramianAngularField
@@ -12,7 +12,7 @@ import itertools
 
 class SyntheticSignalDataset(Dataset):
     def __init__(self, n_samples, n_features=1, n_timesteps=100, 
-                 image_size=24, transform_method='both', seed=None):
+                 image_size=24, transform_method='all', seed=None):
         """
         Dataset for generating synthetic time series signals on-the-fly.
         
@@ -21,7 +21,7 @@ class SyntheticSignalDataset(Dataset):
             n_features (int): Number of features per series
             n_timesteps (int): Length of each series
             image_size (int): Size of output images
-            transform_method (str): Transformation method ('mtf', 'gaf', or 'both')
+            transform_method (str): Transformation method ('mtf', 'gaf', or 'all')
             seed (int): Random seed for reproducibility
         """
         self.n_samples = n_samples
@@ -42,7 +42,15 @@ class SyntheticSignalDataset(Dataset):
             random.seed(seed)
     
     def generate_signal(self):
-        """Generate a single synthetic signal with diverse patterns."""
+         
+        """
+            Generate a synthetic time series signal composed of various components such as 
+            periodic, trend, seasonal, random walk, step, and noise elements.
+
+            Returns:
+                np.ndarray: Generated 1D time series signal of shape (n_timesteps,)
+        """
+         
         t = np.linspace(0, 4*np.pi, self.n_timesteps)
         
         # Base signal components
@@ -176,7 +184,19 @@ class SyntheticSignalDataset(Dataset):
         return signal
     
     def transform_to_image(self, signal):
-        """Transform a single signal to image representation using multiple methods."""
+       
+        """
+        Transform a 1D signal into one or more 2D image representations using 
+        time-series imaging techniques (MTF, GAF, RP).
+
+        Args:
+            signal (np.ndarray): Input 1D signal of shape (n_timesteps,)
+
+        Returns:
+            np.ndarray: Transformed image(s) of shape (n_channels, image_size, image_size),
+                        where n_channels depends on the selected transform method.
+        """
+
         
         # Reshape for transformation
         signal_scaled = signal.reshape(1, -1)
@@ -205,44 +225,37 @@ class SyntheticSignalDataset(Dataset):
                     idx_j = int(j * len(signal_scaled[0]) / self.image_size)
                     rp[i, j] = np.abs(signal_scaled[0, idx_i] - signal_scaled[0, idx_j])
             transformations.append(rp.reshape(self.image_size, self.image_size))
-            
-            # 4. Continuous Wavelet Transform (CWT)
-            # Using Morlet wavelet
-            # scales = np.linspace(1, self.image_size, self.image_size)
-            # cwt = cwt_func(signal_scaled[0], scipy_signal.morlet2, scales)
-            # cwt = np.abs(cwt)
-            # Resize to match image size
-            # cwt = scipy_signal.resample(cwt, self.image_size, axis=0)
-            # cwt = scipy_signal.resample(cwt, self.image_size, axis=1)
-            # transformations.append(cwt.reshape(self.image_size, self.image_size))
 
-            # Combine all transformations
-            image = np.array(transformations)
-        
-        # elif self.transform_method == 'mtf':
-        #     mtf = MarkovTransitionField(image_size=self.image_size, n_bins=10)
-        #     image = mtf.fit_transform(signal_scaled)
-        
-        # elif self.transform_method == 'gaf':
-        #     gaf = GramianAngularField(image_size=self.image_size, method='summation')
-        #     image = gaf.fit_transform(signal_scaled)
-        
-        # else:  # both (default)
-        #     mtf = MarkovTransitionField(image_size=self.image_size, n_bins=10)
-        #     gaf = GramianAngularField(image_size=self.image_size, method='summation')
-            
-        #     image_mtf = mtf.fit_transform(signal_scaled)
-        #     image_gaf = gaf.fit_transform(signal_scaled)
-            
-        #     image = np.array([image_mtf, image_gaf], axis=1)
-        
+        elif self.transform_method == 'mtf':
+            transformations.append(self.mtf.fit_transform(signal_scaled)[0])
+
+        elif self.transform_method == 'gaf': 
+            gaf_sum = GramianAngularField(image_size=self.image_size, method='summation')
+            gaf_diff = GramianAngularField(image_size=self.image_size, method='difference')
+            transformations.append(gaf_sum.fit_transform(signal_scaled)[0])
+            transformations.append(gaf_diff.fit_transform(signal_scaled)[0])
+
+        else:
+            raise ValueError(f"Unknown transform method: {self.transform_method}")
+
+        # Combine all transformations
+        image = np.array(transformations)
+
         # Normalize the final image to [0, 1] range for better visualization
         image = (image - np.min(image)) / (np.max(image) - np.min(image))
         
         return image
     
     def _permutation_entropy(self, x):
-        """Calculate permutation entropy for a window of data."""
+        """
+            Compute the permutation entropy of a 1D signal segment.
+
+            Args:
+                x (np.ndarray): Input 1D signal or signal segment.
+
+            Returns:
+                float: Estimated permutation entropy.
+        """
         if len(x) < 3:
             return 0
         # Get all possible permutations
@@ -262,9 +275,27 @@ class SyntheticSignalDataset(Dataset):
         return -np.sum(p * np.log2(p))
     
     def __len__(self):
+        """
+            Return the total number of samples in the dataset.
+
+            Returns:
+                int: Number of samples.
+        """
         return self.n_samples
     
     def __getitem__(self, idx):
+        """
+            Generate one sample from the dataset, including the synthetic signal and 
+            its image transformation.
+
+            Args:
+                idx (int): Index of the sample (unused because generation is random).
+
+            Returns:
+                dict: Dictionary containing:
+                    - 'signal' (torch.FloatTensor): Standardized signal of shape (n_timesteps,)
+                    - 'image' (torch.FloatTensor): Transformed image(s) of shape (C, H, W)
+        """
         # Generate signal
         signal = self.generate_signal()
         
@@ -326,11 +357,11 @@ def get_dataloader(n_samples, batch_size=32, n_features=1, n_timesteps=100,
 
 def visualize_batch(batch, n_samples=4):
     """
-    Visualize a batch of signals and their transformations.
-    
+    Visualize a subset of signals and their corresponding transformed images from a batch.
+
     Args:
-        batch (dict): Batch containing 'signal' and 'image' tensors
-        n_samples (int): Number of samples to visualize
+        batch (dict): A batch of data with 'signal' and 'image' tensors.
+        n_samples (int): Number of samples to visualize from the batch.
     """
     signals = batch['signal'].numpy()
     images = batch['image'].numpy()
